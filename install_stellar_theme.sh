@@ -1,63 +1,133 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# ------------------- CONFIG -------------------
-PANEL_DIR="/var/www/pterodactyl"
-BACKUP_DIR="/var/backups/panel_backup_$(date +%F_%T)"
-TEMP_DIR="/tmp/stellar_theme"
-DB_NAME="pterodactyl"
-DB_USER="root"
-# ----------------------------------------------
-
-# Color codes
-GREEN='\033[0;32m'
+# Colors for output
 RED='\033[0;31m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-echo -e "${YELLOW}🔁 Backing up current panel and database...${NC}"
+info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+warn() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+error_exit() { echo -e "${RED}[ERROR]${NC} $1" 1>&2; exit 1; }
+
+# Timestamp for backups
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+BACKUP_DIR="/var/backups"
+WEB_DIR="/var/www/pterodactyl"
+DB_NAME="panel"
+MYSQL_USER="root"
+# (Adjust MYSQL_USER / credentials as needed.)
+
+info "Creating backups (web files and database)..."
 mkdir -p "$BACKUP_DIR"
-cp -r "$PANEL_DIR" "$BACKUP_DIR/panel_files"
-cp "$PANEL_DIR/.env" "$BACKUP_DIR/.env.backup"
-mysqldump -u "$DB_USER" -p "$DB_NAME" > "$BACKUP_DIR/pterodactyl.sql"
-echo -e "${GREEN}✅ Backup complete: $BACKUP_DIR${NC}"
 
-echo -e "${YELLOW}📥 Cloning Stellar Theme from GitHub...${NC}"
-rm -rf "$TEMP_DIR"
-git clone https://github.com/sudarshandev11/stellartheme.git "$TEMP_DIR" || { echo -e "${RED}❌ Failed to clone theme repo.${NC}"; exit 1; }
-
-echo -e "${YELLOW}📁 Copying theme files to panel...${NC}"
-cp -r "$TEMP_DIR/pterodactyl/"* "$PANEL_DIR"
-
-echo -e "${YELLOW}🔧 Ensuring Node.js 16 and Yarn are installed...${NC}"
-
-if ! node -v | grep -q "v16"; then
-    curl -sL https://deb.nodesource.com/setup_16.x | sudo -E bash -
-    sudo apt-get install -y nodejs
+# Backup web directory
+if [ -d "$WEB_DIR" ]; then
+    info "Archiving $WEB_DIR..."
+    tar czf "$BACKUP_DIR/panel_www_$TIMESTAMP.tar.gz" -C "$(dirname "$WEB_DIR")" "$(basename "$WEB_DIR")" \
+        || error_exit "Failed to create web root backup"
+    success "Web root backed up: $BACKUP_DIR/panel_www_$TIMESTAMP.tar.gz"
 else
-    echo -e "${GREEN}✔ Node.js 16 is already installed.${NC}"
+    warn "$WEB_DIR not found; skipping web root backup"
 fi
 
-if ! command -v yarn &> /dev/null; then
-    npm install -g yarn
+# Backup MySQL database
+info "Backing up MySQL database '$DB_NAME'..."
+if command -v mysqldump >/dev/null 2>&1; then
+    mysqldump -u "$MYSQL_USER" -p "$DB_NAME" > "$BACKUP_DIR/${DB_NAME}_backup_$TIMESTAMP.sql" \
+        || error_exit "Database backup failed"
+    success "Database '$DB_NAME' backed up: $BACKUP_DIR/${DB_NAME}_backup_$TIMESTAMP.sql"
 else
-    echo -e "${GREEN}✔ Yarn is already installed.${NC}"
+    error_exit "mysqldump not found; install MySQL client tools first"
 fi
 
-echo -e "${YELLOW}📦 Installing frontend dependencies and building panel assets...${NC}"
-cd "$PANEL_DIR"
-yarn add react-feather
-php artisan migrate --force
-yarn install
-yarn build:production
-php artisan view:clear
+# Ensure git is installed for cloning
+if ! command -v git >/dev/null 2>&1; then
+    info "Installing git..."
+    apt-get update -qq
+    apt-get install -y git curl unzip || error_exit "Failed to install git/curl"
+fi
 
-echo -e "${YELLOW}🔐 Fixing permissions...${NC}"
-chown -R www-data:www-data "$PANEL_DIR"
-chmod -R 755 "$PANEL_DIR"
+# Clone the Stellar theme repository
+TEMP_DIR="/tmp/stellar_theme"
+if [ -d "$TEMP_DIR" ]; then
+    warn "$TEMP_DIR already exists, removing..."
+    rm -rf "$TEMP_DIR"
+fi
+info "Cloning Stellar theme repository..."
+git clone https://github.com/sudarshandev11/stellartheme "$TEMP_DIR" \
+    || error_exit "Failed to clone repository"
+success "Repository cloned to $TEMP_DIR"
 
-echo -e "${YELLOW}🧹 Cleaning up temporary files...${NC}"
-rm -rf "$TEMP_DIR"
+# Copy theme files to panel directory
+info "Copying theme files into $WEB_DIR..."
+if [ -d "$WEB_DIR" ]; then
+    cp -a "$TEMP_DIR/." "$WEB_DIR" || error_exit "Failed to copy theme files"
+    success "Theme files copied to $WEB_DIR"
+else
+    error_exit "$WEB_DIR not found; ensure Pterodactyl is installed"
+fi
 
-echo -e "${GREEN}✅ Stellar Theme installation complete!${NC}"
-echo -e "${YELLOW}🛡️ Backup saved at: ${BACKUP_DIR}${NC}"
-echo -e "${YELLOW}🎨 Activate the theme from: Admin Panel > Settings > Theme${NC}"
+# Ensure Node.js v20 is installed
+if command -v node >/dev/null 2>&1; then
+    NODE_VER=$(node -v)
+    info "Detected Node.js version $NODE_VER"
+else
+    info "Node.js not found, installing Node.js 20.x..."
+    curl -fsSL https://deb.nodesource.com/setup_20.x -o nodesource_setup.sh \
+        || error_exit "Failed to download Node.js setup script"
+    bash nodesource_setup.sh || error_exit "NodeSource setup script failed"
+    apt-get install -y nodejs || error_exit "Failed to install Node.js"
+    success "Node.js installed"
+fi
+
+# Ensure Yarn is installed
+if command -v yarn >/dev/null 2>&1; then
+    YARN_VER=$(yarn -v)
+    info "Detected Yarn version $YARN_VER"
+else
+    info "Yarn not found, installing Yarn via npm..."
+    npm install -g yarn || error_exit "Failed to install Yarn"
+    success "Yarn installed"
+fi
+
+# Install frontend dependencies (including react-feather)
+info "Installing NPM dependencies..."
+cd "$WEB_DIR"
+if [ -f package.json ]; then
+    yarn add react-feather --ignore-scripts || warn "react-feather installation encountered an issue"
+    yarn install --frozen-lockfile || error_exit "yarn install failed"
+    success "NPM dependencies installed"
+else
+    warn "package.json not found, skipping npm install"
+fi
+
+# Run database migrations
+info "Running database migrations..."
+php artisan migrate --force || error_exit "artisan migrate failed"
+success "Database migrated"
+
+# Build frontend assets
+info "Building assets with yarn..."
+export NODE_OPTIONS=--openssl-legacy-provider
+yarn build || error_exit "Asset build failed"
+success "Assets built"
+
+# Clear view cache
+info "Clearing view cache..."
+php artisan view:clear || warn "artisan view:clear failed"
+success "View cache cleared"
+
+# Fix permissions
+info "Fixing ownership and permissions..."
+chown -R www-data:www-data "$WEB_DIR" || error_exit "Failed to set ownership"
+find "$WEB_DIR" -type d -exec chmod 755 {} \\; || error_exit "Failed to set directory permissions"
+find "$WEB_DIR" -type f -exec chmod 644 {} \\; || error_exit "Failed to set file permissions"
+success "Ownership and permissions set"
+
+echo
+success "Stellar theme installation complete!"
+echo "Backup files are located in $BACKUP_DIR"
