@@ -1,44 +1,43 @@
 #!/bin/bash
 
-# ------------------- CONFIG -------------------
+set -e
+
 PANEL_DIR="/var/www/pterodactyl"
-BACKUP_DIR="/var/backups/panel_backup_$(date +%F_%T)"
-TEMP_DIR="/tmp/stellar_theme"
-DB_NAME="pterodactyl"
-DB_USER="root"
-# ----------------------------------------------
+BACKUP_DIR="/var/backups"
+TIMESTAMP=$(date +"%Y-%m-%d_%H:%M:%S")
+THEME_REPO="https://github.com/sudarshandev11/stellartheme"
+TMP_DIR="/tmp/stellar_theme"
 
 echo "🔁 Backing up current panel..."
 mkdir -p "$BACKUP_DIR"
-cp -r "$PANEL_DIR" "$BACKUP_DIR/panel_files"
-cp "$PANEL_DIR/.env" "$BACKUP_DIR/.env.backup"
-mysqldump -u "$DB_USER" -p "$DB_NAME" > "$BACKUP_DIR/pterodactyl.sql"
-echo "✅ Backup complete: $BACKUP_DIR"
+read -sp "Enter password: " MYSQL_PWD
+mysqldump -u root -p"$MYSQL_PWD" --all-databases > "$BACKUP_DIR/panel_backup_${TIMESTAMP}.sql" 2>/dev/null || echo "⚠️ Warning: Database backup failed (check if DB name is correct)."
+tar -czf "$BACKUP_DIR/panel_backup_${TIMESTAMP}.tar.gz" "$PANEL_DIR"
+echo -e "\n✅ Backup complete: $BACKUP_DIR/panel_backup_${TIMESTAMP}"
 
 echo "📥 Cloning Stellar Theme from GitHub..."
-rm -rf "$TEMP_DIR"
-git clone https://github.com/sudarshandev11/stellartheme.git "$TEMP_DIR"
+rm -rf "$TMP_DIR"
+git clone "$THEME_REPO" "$TMP_DIR"
 
 echo "📁 Copying modified theme files..."
-cp -r "$TEMP_DIR/pterodactyl/"* "$PANEL_DIR"
+cp -r "$TMP_DIR/"* "$PANEL_DIR"
 
-echo "🔧 Installing Node.js 16 and Yarn (if not already installed)..."
-curl -sL https://deb.nodesource.com/setup_16.x | sudo -E bash -
-sudo apt-get install -y nodejs
-npm install -g yarn
+echo "🔧 Installing Node.js 20 and Yarn (if not already installed)..."
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt-get install -y nodejs yarn
+
+cd "$PANEL_DIR"
 
 echo "📦 Installing panel frontend dependencies and building assets..."
-cd "$PANEL_DIR"
-yarn add react-feather
-php artisan migrate --force
 yarn install
-yarn build:production
+yarn build
+
+echo "🧹 Clearing compiled views..."
 php artisan view:clear
 
 echo "🔐 Fixing permissions..."
 chown -R www-data:www-data "$PANEL_DIR"
-chmod -R 755 "$PANEL_DIR"
 
 echo "✅ Stellar Theme installation complete!"
-echo "🛡️ Backup location: $BACKUP_DIR"
+echo "🛡️ Backup location: $BACKUP_DIR/panel_backup_${TIMESTAMP}"
 echo "🎨 Activate it from Admin Panel > Settings > Theme"
